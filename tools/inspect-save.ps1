@@ -120,14 +120,26 @@ Write-Host ""
 Write-Host "=== slots in $($save.Name) ===" -ForegroundColor Cyan
 Write-Host "slot     entry        body    length  name                      modified"
 
-# Slot 0's entry sits inside the XOR-encrypted first 0xF0 bytes of the table, so its name
-# reads as garbage here. Every other slot is plaintext.
-$slots = @(0..7) + @(98, 99, 100, 199)
-foreach ($i in $slots) {
+# Every slot, not a sample. A fixed sample cannot tell "no saves exist" from "the saves are
+# somewhere I did not look".
+$populated = 0
+for ($i = 0; $i -lt $ENTRY_COUNT; $i++) {
     $entryOffset = $PNG_HEADER + $i * $ENTRY_LEN
     $entry = Read-Bytes $save.FullName $entryOffset $ENTRY_LEN
     $name = Read-CString $entry
     $length = [BitConverter]::ToInt32($entry, 0x50)
+
+    # Slot 0's entry sits in the XOR-encrypted first 0xF0 bytes of the table, so its name is
+    # garbage here. Strip anything unprintable so it cannot wreck the table.
+    $name = ($name.ToCharArray() | ForEach-Object {
+        if ([int]$_ -ge 32 -and [int]$_ -lt 127) { $_ } else { "." }
+    }) -join ""
+    if ($name.Length -gt 24) { $name = $name.Substring(0, 24) }
+
+    $isEmpty = ($name -eq "" -and $length -eq 0)
+    if ($isEmpty -and $i -ne 99) { continue }
+    $populated++
+
     $modified = [BitConverter]::ToInt32($entry, 0x48)
     $when = ""
     if ($modified -gt 0) {
@@ -135,18 +147,24 @@ foreach ($i in $slots) {
     }
     $shown = $name
     if ($shown -eq "") { $shown = "(empty)" }
-    if ($i -eq 0) { $shown = "$shown [xor region]" }
+    if ($i -eq 0) { $shown = "$shown [xor]" }
+    if ($i -eq 99) { $shown = "$shown  <- autosave target" }
+
     Write-Host ("{0,4}  {1,8:x}  {2,10:x}  {3,8:x}  {4,-24}  {5}" -f `
         $i, $entryOffset, ($PNG_HEADER + $ENTRY_COUNT * $ENTRY_LEN + $i * $STRIDE), $length, $shown, $when)
 }
+Write-Host ""
+Write-Host "$populated of $ENTRY_COUNT slots in use (slot 99 always listed)"
 
 Write-Host ""
-Write-Host "=== first populated slot, raw entry ===" -ForegroundColor Cyan
+Write-Host "=== raw entry of the first real game save ===" -ForegroundColor Cyan
 $found = $false
 foreach ($i in 1..($ENTRY_COUNT - 1)) {
     $entryOffset = $PNG_HEADER + $i * $ENTRY_LEN
     $entry = Read-Bytes $save.FullName $entryOffset $ENTRY_LEN
-    if ((Read-CString $entry) -ne "") {
+    $entryName = Read-CString $entry
+    # Skip the system file, its body is a KHSQ blob and not a save at all.
+    if ($entryName -ne "" -and [BitConverter]::ToInt32($entry, 0x50) -eq $BODY_LEN) {
         Write-Host "slot $i entry at 0x$('{0:x}' -f $entryOffset), first 0x60 bytes:"
         Write-Host (Show-Hex $entry[0..0x5F])
         $bodyOffset = $PNG_HEADER + $ENTRY_COUNT * $ENTRY_LEN + $i * $STRIDE
@@ -156,7 +174,10 @@ foreach ($i in 1..($ENTRY_COUNT - 1)) {
         break
     }
 }
-if (-not $found) { Write-Host "No populated slot found. Save the game once in-game first." }
+if (-not $found) {
+    Write-Host "No game save in this container yet, only the system file."
+    Write-Host "Save once at any save point in-game, then run this again."
+}
 
 Write-Host ""
 Write-Host "=== continue-block dump ===" -ForegroundColor Cyan
