@@ -9,6 +9,7 @@
 param(
     [string]$GameData = "",
     [string]$Autosave = "",
+    [string]$Compare = "",
     [switch]$DeepScan
 )
 
@@ -101,6 +102,56 @@ function Get-SteamGameDirs {
         }
     }
     return $dirs
+}
+
+# Compare two containers region by region, to see which slots a bad write actually touched.
+if ($Compare -ne "") {
+    if ($GameData -eq "") {
+        Write-Host "-Compare needs the live container too: -GameData is not it, pass -Autosave"
+        Write-Host "Usage: -Compare ""<backup.png>"" -Container ""<live.png>"" is not supported;"
+        Write-Host "instead pass the two files as -Compare ""<a.png>"" and -Autosave ""<b.png>"""
+    }
+    $a = $Compare
+    $b = $Autosave
+    if (-not (Test-Path $a) -or -not (Test-Path $b)) {
+        Write-Host "Compare needs two existing files: -Compare <a.png> -Autosave <b.png>"
+        exit 1
+    }
+    Write-Host "=== comparing containers ===" -ForegroundColor Cyan
+    Write-Host "A: $a"
+    Write-Host "B: $b"
+    $ba = [IO.File]::ReadAllBytes($a)
+    $bb = [IO.File]::ReadAllBytes($b)
+    if ($ba.Length -ne $bb.Length) { Write-Host "sizes differ: $($ba.Length) vs $($bb.Length)" }
+
+    $limit = [Math]::Min($ba.Length, $bb.Length)
+    $regions = @()
+    $regions += @{ Name = "png header"; Start = 0; End = $PNG_HEADER }
+    for ($i = 0; $i -lt $ENTRY_COUNT; $i++) {
+        $regions += @{ Name = "entry $i"; Start = ($PNG_HEADER + $i * $ENTRY_LEN); End = ($PNG_HEADER + ($i + 1) * $ENTRY_LEN) }
+    }
+    for ($i = 0; $i -lt $ENTRY_COUNT; $i++) {
+        $regions += @{ Name = "body $i"; Start = ($BODY_BASE + $i * $STRIDE); End = ($BODY_BASE + $i * $STRIDE + $BODY_LEN) }
+    }
+    $diffs = 0
+    foreach ($r in $regions) {
+        if ($r.Start -ge $limit) { continue }
+        $stop = [Math]::Min($r.End, $limit)
+        $first = -1
+        $count = 0
+        for ($j = $r.Start; $j -lt $stop; $j++) {
+            if ($ba[$j] -ne $bb[$j]) {
+                if ($first -lt 0) { $first = $j }
+                $count++
+            }
+        }
+        if ($count -gt 0) {
+            Write-Host ("  {0,-12} differs: {1} bytes, first at 0x{2:x}" -f $r.Name, $count, $first)
+            $diffs++
+        }
+    }
+    if ($diffs -eq 0) { Write-Host "  identical across every slot" }
+    exit 0
 }
 
 Write-Host "=== is the game running? ===" -ForegroundColor Cyan

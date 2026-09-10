@@ -1,10 +1,17 @@
 LUAGUI_NAME = "1fmAutosave"
 LUAGUI_AUTH = "Denhonator (snapshot logic), standalone build by Keralin"
-LUAGUI_DESC = "Autosaves into save slot 99 on every room load. Also keeps a side copy restorable with L1+L2+R1+R2+Right."
+LUAGUI_DESC = "Autosaves on every room load. Restore with L1+L2+R1+R2+Right, or promote into save 99 with the game closed."
 
--- Which container slot the autosave lands in. Slot 98 is named "-99", so it shows up as save
--- 99 in-game, the same slot Re:Fined uses for KH2. Saves start at slot 0, so this stays clear
--- of them.
+-- Writing the save container from here races the game, which keeps the same file open and
+-- rewrites it on its own schedule (saving, quitting, Steam Cloud syncing). A 93 KB write landing
+-- inside one of those leaves a mixed file, and that can wreck slots this mod never aimed at.
+-- It corrupted a real save that way. Re:Fined gets away with it in KH2 because it lives inside
+-- the process and writes at a moment it controls; this script only knows the HUD faded in.
+-- So the slot write is off, and tools/promote-autosave.ps1 does it with the game closed.
+local WRITE_TO_SAVE_SLOT = false
+
+-- Which container slot the autosave lands in when enabled. Slot 98 is named "-99", so it shows
+-- up as save 99 in-game, the same slot Re:Fined uses for KH2. Saves start at slot 0.
 local AUTOSAVE_SLOT = 98
 
 local SAVE_FILE = "kh1-autosave.dat"
@@ -161,6 +168,12 @@ function _OnInit()
         require("VersionCheck")
     else
         ConsolePrint("KH1 not detected, not running script")
+        return
+    end
+
+    if not WRITE_TO_SAVE_SLOT then
+        ConsolePrint("Autosave: slot writing off, keeping side copies only.")
+        ConsolePrint("Autosave: promote one into save 99 with tools/promote-autosave.ps1, game closed.")
         return
     end
 
