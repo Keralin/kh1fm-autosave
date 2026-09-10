@@ -27,6 +27,10 @@ The older side copy is there for the one case that bites: you walk into a boss a
 underleveled, the autosave points at that room, and restoring it drops you straight back into
 the fight. Down instead of Right gets you the room before.
 
+Loading a save fades the HUD in exactly like walking through a door, so the first snapshot after
+a load is skipped. Without that, recovering from a crash overwrote the snapshot you crashed with
+using the save point you had just loaded, and Right handed you back your own save point.
+
 Your own saves start at slot 0 and are never touched. To put the autosave somewhere else,
 change `AUTOSAVE_SLOT` at the top of `1fmAutosave.lua` (it is the slot index, one below the
 save number you see in-game).

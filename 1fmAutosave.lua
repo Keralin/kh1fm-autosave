@@ -126,7 +126,12 @@ local LOAD_PREV = SHOULDERS | DPAD_DOWN
 
 local prevHUD = 0
 local lastInput = 0
-local skipNextWrite = false
+local wasTitle = false
+
+-- Loading a save fades the HUD in exactly like walking through a door, so the first snapshot
+-- after a load would overwrite the one you crashed with and leave you staring at your own save
+-- point. Start out skipping, and skip again after every visit to the title screen.
+local skipNextWrite = true
 
 local containerPath = nil
 local slotName = nil
@@ -304,6 +309,13 @@ function _OnFrame()
     end
     lastInput = input
 
+    -- Reaching the title screen means whatever comes next is a load, not a room transition.
+    local atTitle = ReadByte(title) ~= 0
+    if atTitle and not wasTitle then
+        skipNextWrite = true
+    end
+    wasTitle = atTitle
+
     -- Sora's HUD reaching full opacity is the cheapest "a room finished loading and you have
     -- control" signal in the game. It stays at 0 on the title screen and in the gummi ship,
     -- which is exactly where a snapshot would be useless.
@@ -311,6 +323,7 @@ function _OnFrame()
     if hud == 1 and prevHUD < 1 then
         if skipNextWrite then
             skipNextWrite = false
+            ConsolePrint("Autosave: skipped, this looked like a save being loaded")
         else
             snapshot()
         end

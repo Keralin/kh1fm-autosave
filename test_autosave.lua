@@ -4,11 +4,12 @@ local CONTINUE_SIZE = 93184
 
 -- Fake addresses. Values are arbitrary, only their distinctness matters.
 continue, soraHUD, inputAddress, closeMenu = 100, 200, 300, 400
+title = 1200
 warpTrigger, warpType1, warpType2, cam, config = 500, 600, 700, 800, 900
 world, room = 1000, 1100
 canExecute = true
 
-local hud, input, warpTriggerValue = 0, 0, 0
+local hud, input, warpTriggerValue, titleValue = 0, 0, 0, 0
 local continueData = string.rep("A", CONTINUE_SIZE)
 local restored, writes, logs = nil, {}, {}
 
@@ -18,6 +19,7 @@ function ReadInt(a) return a == inputAddress and input or 0 end
 function ReadLong(a) return 0 end
 function ReadByte(a)
     if a == warpTrigger then return warpTriggerValue end
+    if a == title then return titleValue end
     if a == world then return 3 end
     if a == room then return 7 end
     return 0
@@ -60,7 +62,13 @@ assert(load(source, "1fmAutosave.lua"))()
 local SAVE, PREV, TMP = prefix .. ".dat", prefix .. "-prev.dat", prefix .. ".tmp"
 os.remove(SAVE); os.remove(PREV); os.remove(TMP)
 
--- 1. First room load writes a whole snapshot and rotates nothing out.
+-- 1. The first room load is a save being loaded, so it must not be recorded. Getting this
+-- wrong overwrites the snapshot you crashed with using the save point you just loaded.
+roomLoad()
+assert(read(SAVE) == nil, "the load that starts a session was recorded as a room change")
+assert(lastLog():find("skipped"), "no log line for the skipped load")
+
+-- Now a real room load writes a whole snapshot and rotates nothing out.
 roomLoad()
 assert(#read(SAVE) == CONTINUE_SIZE, "first snapshot has wrong size")
 assert(read(PREV) == nil, "nothing should be rotated out on the first write")
@@ -93,14 +101,22 @@ continueData = string.rep("C", CONTINUE_SIZE)
 roomLoad()
 assert(read(SAVE):sub(1, 1) == "C" and read(PREV):sub(1, 1) == "B", "rotation stopped working")
 
--- 7. A truncated snapshot is refused instead of being written into memory.
+-- 7. Passing through the title screen means the next HUD rise is a load, not a room change.
+continueData = string.rep("T", CONTINUE_SIZE)
+titleValue = 1; _OnFrame()
+titleValue = 0; _OnFrame()
+roomLoad()
+assert(read(SAVE):sub(1, 1) == "C", "a load after the title screen overwrote the snapshot")
+assert(read(PREV):sub(1, 1) == "B", "a load after the title screen rotated the slots")
+
+-- 8. A truncated snapshot is refused instead of being written into memory.
 local f = assert(io.open(SAVE, "wb")); f:write(string.rep("X", 512)); f:close()
 restored = nil
 press(LOAD_LATEST)
 assert(restored == nil, "a truncated snapshot was loaded into the continue block")
 assert(lastLog():find("refusing to load"), "no warning for the truncated snapshot")
 
--- 8. A missing snapshot is reported, not crashed on.
+-- 9. A missing snapshot is reported, not crashed on.
 os.remove(PREV)
 press(LOAD_PREV)
 assert(restored == nil and lastLog():find("nothing stored"), "missing snapshot not handled")
