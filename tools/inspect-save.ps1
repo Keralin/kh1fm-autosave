@@ -10,6 +10,7 @@ param(
     [string]$GameData = "",
     [string]$Autosave = "",
     [string]$Compare = "",
+    [string]$Against = "",
     [switch]$DeepScan
 )
 
@@ -106,15 +107,10 @@ function Get-SteamGameDirs {
 
 # Compare two containers region by region, to see which slots a bad write actually touched.
 if ($Compare -ne "") {
-    if ($GameData -eq "") {
-        Write-Host "-Compare needs the live container too: -GameData is not it, pass -Autosave"
-        Write-Host "Usage: -Compare ""<backup.png>"" -Container ""<live.png>"" is not supported;"
-        Write-Host "instead pass the two files as -Compare ""<a.png>"" and -Autosave ""<b.png>"""
-    }
     $a = $Compare
-    $b = $Autosave
-    if (-not (Test-Path $a) -or -not (Test-Path $b)) {
-        Write-Host "Compare needs two existing files: -Compare <a.png> -Autosave <b.png>"
+    $b = $Against
+    if ($b -eq "" -or -not (Test-Path $a) -or -not (Test-Path $b)) {
+        Write-Host "Usage: -Compare ""<one.png>"" -Against ""<other.png>"""
         exit 1
     }
     Write-Host "=== comparing containers ===" -ForegroundColor Cyan
