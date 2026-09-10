@@ -1,13 +1,15 @@
-# Read-only. Reports the layout of the KH1 save container so an autosave can be written
-# into a real slot. Writes nothing.
+# Read-only. Finds every KH1 save container on this machine and reports which one holds the
+# game saves, plus the layout needed to write an autosave into a real slot. Writes nothing.
 #
 #   powershell -ExecutionPolicy Bypass -File inspect-save.ps1
-#   powershell -ExecutionPolicy Bypass -File inspect-save.ps1 -GameData "D:\somewhere\KINGDOM HEARTS HD 1.5+2.5 ReMIX"
+#   powershell -ExecutionPolicy Bypass -File inspect-save.ps1 -DeepScan
+#   powershell -ExecutionPolicy Bypass -File inspect-save.ps1 -GameData "D:\path\to\folder"
 #   powershell -ExecutionPolicy Bypass -File inspect-save.ps1 -Autosave "C:\path\kh1-autosave.dat"
 
 param(
     [string]$GameData = "",
-    [string]$Autosave = ""
+    [string]$Autosave = "",
+    [switch]$DeepScan
 )
 
 $PNG_HEADER = 0x70
@@ -37,8 +39,16 @@ function Read-CString($bytes) {
     return [Text.Encoding]::ASCII.GetString($bytes, 0, $end)
 }
 
-# Documents gets redirected (OneDrive, or a moved profile folder), so ask Windows where it is
-# instead of gluing $env:USERPROFILE and "Documents" together.
+function Clean-Name($name) {
+    $out = ($name.ToCharArray() | ForEach-Object {
+        if ([int]$_ -ge 32 -and [int]$_ -lt 127) { $_ } else { "." }
+    }) -join ""
+    if ($out.Length -gt 26) { $out = $out.Substring(0, 26) }
+    return $out
+}
+
+# Documents gets redirected (OneDrive, a moved profile folder), so ask Windows where it is
+# rather than gluing USERPROFILE and "Documents" together.
 function Get-DataRoots {
     $roots = @()
     $docs = [Environment]::GetFolderPath('MyDocuments')
@@ -47,20 +57,25 @@ function Get-DataRoots {
         $roots += (Join-Path $env:OneDrive "Documents")
         $roots += (Join-Path $env:OneDrive "Documents\My Games")
     }
+    if ($env:OneDriveConsumer) { $roots += (Join-Path $env:OneDriveConsumer "Documents") }
     $roots += (Join-Path $env:USERPROFILE "Documents")
     $roots += (Join-Path $env:USERPROFILE "Documents\My Games")
     $roots += (Join-Path $env:USERPROFILE "Saved Games")
+    $roots += (Join-Path $env:LOCALAPPDATA "KINGDOM HEARTS HD 1.5+2.5 ReMIX")
     return $roots | Select-Object -Unique
+}
+
+function Get-SteamPath {
+    try { return (Get-ItemProperty 'HKCU:\Software\Valve\Steam' -ErrorAction Stop).SteamPath.Replace('/', '\') }
+    catch { return "" }
 }
 
 function Get-SteamGameDirs {
     $dirs = @()
-    $steam = ""
-    try { $steam = (Get-ItemProperty 'HKCU:\Software\Valve\Steam' -ErrorAction Stop).SteamPath } catch { }
-    if (-not $steam) { return $dirs }
-
-    $libraries = @($steam.Replace('/', '\'))
-    $vdf = Join-Path $libraries[0] "steamapps\libraryfolders.vdf"
+    $steam = Get-SteamPath
+    if ($steam -eq "") { return $dirs }
+    $libraries = @($steam)
+    $vdf = Join-Path $steam "steamapps\libraryfolders.vdf"
     if (Test-Path $vdf) {
         foreach ($line in (Get-Content $vdf)) {
             if ($line -match '"path"\s+"(.+)"') { $libraries += $matches[1].Replace('\\', '\') }
@@ -76,113 +91,121 @@ function Get-SteamGameDirs {
     return $dirs
 }
 
-Write-Host "=== save container ===" -ForegroundColor Cyan
-
-if ($GameData -eq "") {
-    $tried = Get-DataRoots
-    foreach ($root in $tried) {
-        if (-not (Test-Path $root)) { continue }
-        $hit = Get-ChildItem $root -Directory -Filter "KINGDOM HEARTS*" -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-        if ($null -ne $hit) { $GameData = $hit.FullName; break }
-    }
-    if ($GameData -eq "") {
-        Write-Host "No 'KINGDOM HEARTS*' folder under any of these:"
-        $tried | ForEach-Object { Write-Host "  $_" }
-        Write-Host ""
-        Write-Host "Find it yourself and pass it: -GameData ""<path>"""
-        Write-Host "It is the folder holding a 'scripts' subfolder and the save .png files."
-        exit 1
-    }
+Write-Host "=== is the game running? ===" -ForegroundColor Cyan
+$running = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like "*KINGDOM*" }
+if ($running) {
+    foreach ($p in $running) { Write-Host "RUNNING: $($p.ProcessName)" -ForegroundColor Yellow }
+    Write-Host "The container on disk can be stale while the game holds it. Close the game and re-run."
+} else {
+    Write-Host "No KINGDOM HEARTS process, the files on disk are current."
 }
 
-Write-Host "game data: $GameData"
-if (-not (Test-Path $GameData)) { Write-Host "That path does not exist."; exit 1 }
 Write-Host ""
+Write-Host "=== candidate folders ===" -ForegroundColor Cyan
+$dirs = @()
+if ($GameData -ne "") {
+    $dirs += $GameData
+} else {
+    # Collect every match, not just the first. Several installs can coexist (Epic and Steam,
+    # a OneDrive-redirected Documents next to a local one), and only one holds the saves.
+    foreach ($root in (Get-DataRoots)) {
+        if (-not (Test-Path $root)) { continue }
+        $dirs += Get-ChildItem $root -Directory -Filter "KINGDOM HEARTS*" -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.FullName }
+    }
+    $steam = Get-SteamPath
+    if ($steam -ne "" -and (Test-Path (Join-Path $steam "userdata"))) {
+        $dirs += (Join-Path $steam "userdata")
+    }
+    $dirs += Get-SteamGameDirs
+}
+$dirs = $dirs | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+if ($dirs.Count -eq 0) {
+    Write-Host "Nothing found. Roots checked:"
+    Get-DataRoots | ForEach-Object { Write-Host "  $_" }
+    Write-Host "Pass the folder with -GameData ""<path>"", or try -DeepScan."
+    exit 1
+}
+$dirs | ForEach-Object { Write-Host "  $_" }
 
-$candidates = Get-ChildItem $GameData -Recurse -Filter *.png -ErrorAction SilentlyContinue
-if ($candidates.Count -eq 0) { Write-Host "No .png save files in there at all." }
-foreach ($f in $candidates) {
+Write-Host ""
+Write-Host "=== save containers found ===" -ForegroundColor Cyan
+$pngs = @()
+foreach ($dir in $dirs) {
+    $pngs += Get-ChildItem $dir -Recurse -Filter *.png -ErrorAction SilentlyContinue
+}
+if ($DeepScan) {
+    Write-Host "deep scanning $env:USERPROFILE, this takes a while..."
+    $pngs += Get-ChildItem $env:USERPROFILE -Recurse -File -Filter *.png -ErrorAction SilentlyContinue |
+        Where-Object { $_.Length -eq $KH1_SIZE }
+}
+$pngs = $pngs | Sort-Object FullName -Unique
+if ($pngs.Count -eq 0) { Write-Host "No .png files in any candidate folder." }
+foreach ($f in $pngs) {
     $tag = ""
-    if ($f.Length -eq $KH1_SIZE) { $tag = "  <-- KH1FM" }
-    Write-Host ("{0,12}  {1}{2}" -f $f.Length, $f.FullName.Replace("$GameData\", ""), $tag)
+    if ($f.Length -eq $KH1_SIZE) { $tag = "  <-- KH1FM container" }
+    Write-Host ("{0,12}  {1}{2}" -f $f.Length, $f.FullName, $tag)
 }
 
-$save = $candidates | Where-Object { $_.Length -eq $KH1_SIZE } | Select-Object -First 1
-if ($null -eq $save) {
+$containers = $pngs | Where-Object { $_.Length -eq $KH1_SIZE }
+if ($containers.Count -eq 0) {
     Write-Host ""
-    Write-Host "No file of exactly $KH1_SIZE bytes. Either KH1 has never been saved, or this"
-    Write-Host "build uses a container size the save editor does not know. Report the sizes above."
+    Write-Host "No file of exactly $KH1_SIZE bytes. Try -DeepScan. If that finds nothing either,"
+    Write-Host "this build stores saves in a format the save editor does not know."
     exit 1
 }
 
-Write-Host ""
-Write-Host "=== slots in $($save.Name) ===" -ForegroundColor Cyan
-Write-Host "slot     entry        body    length  name                      modified"
+$bestSave = $null
+foreach ($c in $containers) {
+    Write-Host ""
+    Write-Host "=== slots in $($c.FullName) ===" -ForegroundColor Cyan
+    Write-Host "slot     entry        body    length  name                        modified"
+    $used = 0
+    for ($i = 0; $i -lt $ENTRY_COUNT; $i++) {
+        $entryOffset = $PNG_HEADER + $i * $ENTRY_LEN
+        $entry = Read-Bytes $c.FullName $entryOffset $ENTRY_LEN
+        $name = Read-CString $entry
+        $length = [BitConverter]::ToInt32($entry, 0x50)
+        if ($name -eq "" -and $length -eq 0 -and $i -ne 99) { continue }
+        $used++
 
-# Every slot, not a sample. A fixed sample cannot tell "no saves exist" from "the saves are
-# somewhere I did not look".
-$populated = 0
-for ($i = 0; $i -lt $ENTRY_COUNT; $i++) {
-    $entryOffset = $PNG_HEADER + $i * $ENTRY_LEN
-    $entry = Read-Bytes $save.FullName $entryOffset $ENTRY_LEN
-    $name = Read-CString $entry
-    $length = [BitConverter]::ToInt32($entry, 0x50)
+        $modified = [BitConverter]::ToInt32($entry, 0x48)
+        $when = ""
+        if ($modified -gt 0) {
+            $when = [DateTimeOffset]::FromUnixTimeSeconds($modified).LocalDateTime.ToString("yyyy-MM-dd HH:mm")
+        }
+        $shown = Clean-Name $name
+        if ($shown -eq "") { $shown = "(empty)" }
+        if ($i -eq 0) { $shown = "$shown [xor]" }
+        if ($i -eq 99) { $shown = "$shown  <- autosave target" }
+        Write-Host ("{0,4}  {1,8:x}  {2,10:x}  {3,8:x}  {4,-26}  {5}" -f `
+            $i, $entryOffset, ($PNG_HEADER + $ENTRY_COUNT * $ENTRY_LEN + $i * $STRIDE), $length, $shown, $when)
 
-    # Slot 0's entry sits in the XOR-encrypted first 0xF0 bytes of the table, so its name is
-    # garbage here. Strip anything unprintable so it cannot wreck the table.
-    $name = ($name.ToCharArray() | ForEach-Object {
-        if ([int]$_ -ge 32 -and [int]$_ -lt 127) { $_ } else { "." }
-    }) -join ""
-    if ($name.Length -gt 24) { $name = $name.Substring(0, 24) }
-
-    $isEmpty = ($name -eq "" -and $length -eq 0)
-    if ($isEmpty -and $i -ne 99) { continue }
-    $populated++
-
-    $modified = [BitConverter]::ToInt32($entry, 0x48)
-    $when = ""
-    if ($modified -gt 0) {
-        $when = [DateTimeOffset]::FromUnixTimeSeconds($modified).LocalDateTime.ToString("yyyy-MM-dd HH:mm")
+        if ($length -eq $BODY_LEN -and $null -eq $bestSave) {
+            $bestSave = @{ File = $c.FullName; Slot = $i; Entry = $entry; EntryOffset = $entryOffset }
+        }
     }
-    $shown = $name
-    if ($shown -eq "") { $shown = "(empty)" }
-    if ($i -eq 0) { $shown = "$shown [xor]" }
-    if ($i -eq 99) { $shown = "$shown  <- autosave target" }
-
-    Write-Host ("{0,4}  {1,8:x}  {2,10:x}  {3,8:x}  {4,-24}  {5}" -f `
-        $i, $entryOffset, ($PNG_HEADER + $ENTRY_COUNT * $ENTRY_LEN + $i * $STRIDE), $length, $shown, $when)
+    Write-Host "$used of $ENTRY_COUNT slots in use (slot 99 always listed)"
 }
-Write-Host ""
-Write-Host "$populated of $ENTRY_COUNT slots in use (slot 99 always listed)"
 
 Write-Host ""
-Write-Host "=== raw entry of the first real game save ===" -ForegroundColor Cyan
-$found = $false
-foreach ($i in 1..($ENTRY_COUNT - 1)) {
-    $entryOffset = $PNG_HEADER + $i * $ENTRY_LEN
-    $entry = Read-Bytes $save.FullName $entryOffset $ENTRY_LEN
-    $entryName = Read-CString $entry
-    # Skip the system file, its body is a KHSQ blob and not a save at all.
-    if ($entryName -ne "" -and [BitConverter]::ToInt32($entry, 0x50) -eq $BODY_LEN) {
-        Write-Host "slot $i entry at 0x$('{0:x}' -f $entryOffset), first 0x60 bytes:"
-        Write-Host (Show-Hex $entry[0..0x5F])
-        $bodyOffset = $PNG_HEADER + $ENTRY_COUNT * $ENTRY_LEN + $i * $STRIDE
-        Write-Host "body at 0x$('{0:x}' -f $bodyOffset), first 16 bytes:"
-        Write-Host (Show-Hex (Read-Bytes $save.FullName $bodyOffset 16))
-        $found = $true
-        break
-    }
-}
-if (-not $found) {
-    Write-Host "No game save in this container yet, only the system file."
-    Write-Host "Save once at any save point in-game, then run this again."
+Write-Host "=== raw entry of a real game save ===" -ForegroundColor Cyan
+if ($null -eq $bestSave) {
+    Write-Host "No slot anywhere has a full save body ($BODY_LEN bytes)."
+    Write-Host "Every container found holds only the system file, so the live save is elsewhere."
+    Write-Host "Re-run with -DeepScan."
+} else {
+    Write-Host "$($bestSave.File) slot $($bestSave.Slot), entry at 0x$('{0:x}' -f $bestSave.EntryOffset):"
+    Write-Host (Show-Hex $bestSave.Entry[0..0x5F])
+    $bodyOffset = $PNG_HEADER + $ENTRY_COUNT * $ENTRY_LEN + $bestSave.Slot * $STRIDE
+    Write-Host "body at 0x$('{0:x}' -f $bodyOffset), first 16 bytes:"
+    Write-Host (Show-Hex (Read-Bytes $bestSave.File $bodyOffset 16))
 }
 
 Write-Host ""
 Write-Host "=== continue-block dump ===" -ForegroundColor Cyan
 if ($Autosave -eq "") {
-    $searchIn = @($PSScriptRoot, (Get-Location).Path) + (Get-SteamGameDirs) + @($GameData)
+    $searchIn = @($PSScriptRoot, (Get-Location).Path) + (Get-SteamGameDirs) + $dirs
     foreach ($dir in ($searchIn | Select-Object -Unique)) {
         if (-not $dir -or -not (Test-Path $dir)) { continue }
         $hit = Get-ChildItem $dir -Recurse -Filter "kh1-autosave.dat" -ErrorAction SilentlyContinue |
@@ -192,10 +215,8 @@ if ($Autosave -eq "") {
 }
 if ($Autosave -eq "" -or -not (Test-Path $Autosave)) {
     Write-Host "kh1-autosave.dat not found. Run the mod once, or pass it with -Autosave."
-    Write-Host "Looked in the script folder, the current folder, the Steam game folders and the game data folder."
     exit 0
 }
-
 $size = (Get-Item $Autosave).Length
 Write-Host "$Autosave"
 Write-Host ("size {0} bytes, expected {1}" -f $size, $BODY_LEN)
@@ -207,5 +228,5 @@ if ($magic -eq 5) {
 } elseif ($magic -eq 4) {
     Write-Host "magic code 4: vanilla KH1 save body, not Final Mix" -ForegroundColor Yellow
 } else {
-    Write-Host "magic code $magic, expected 5 for Final Mix. The continue block may not be a save body." -ForegroundColor Yellow
+    Write-Host "magic code $magic, expected 5. The continue block may not be a save body." -ForegroundColor Yellow
 }
