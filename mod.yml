@@ -1,0 +1,14 @@
+title: KH1 Auto Save (1.0.0)
+originalAuthor: Denhonator
+description: >-
+  Snapshots the game every time a room finishes loading, so a crash or a bad fight never
+  costs more than the room you were in. Restore with L1+L2+R1+R2+D-pad Right, or
+  L1+L2+R1+R2+D-pad Down for the snapshot before that. LuaBackend script, requires
+  Denhonator's io_packages address files.
+game: kh1
+assets:
+- name: scripts/1fmAutosave.lua
+  platform: pc
+  method: copy
+  source:
+  - name: 1fmAutosave.lua
