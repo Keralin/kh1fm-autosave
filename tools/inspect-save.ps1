@@ -49,6 +49,18 @@ function Clean-Name($name) {
 
 # Documents gets redirected (OneDrive, a moved profile folder), so ask Windows where it is
 # rather than gluing USERPROFILE and "Documents" together.
+# The first 0xF0 bytes of the entry table are XOR'd with a 16-byte key that sits, in the clear,
+# at table offset 0xE0. Only slot 0's entry falls inside that range, which is why its name and
+# length read as noise until it is decrypted.
+function Get-TableHead($path) {
+    $raw = Read-Bytes $path $PNG_HEADER 0xF0
+    $key = New-Object byte[] 16
+    [Array]::Copy($raw, 0xE0, $key, 0, 16)
+    $out = New-Object byte[] 0xF0
+    for ($i = 0; $i -lt 0xF0; $i++) { $out[$i] = [byte](($raw[$i] -bxor $key[$i % 16]) -band 0xFF) }
+    return @{ Key = $key; Plain = $out }
+}
+
 function Get-DataRoots {
     $roots = @()
     $docs = [Environment]::GetFolderPath('MyDocuments')
@@ -163,6 +175,9 @@ foreach ($c in $containers) {
     Write-Host "=== slots in $($c.FullName) ===" -ForegroundColor Cyan
     Write-Host "slot     entry        body    length  name                        body[0:8]            modified"
 
+    $tableHead = Get-TableHead $c.FullName
+    Write-Host ("xor key at 0x{0:x}: {1}" -f ($PNG_HEADER + 0xE0), (Show-Hex $tableHead.Key))
+
     $stream = [IO.File]::OpenRead($c.FullName)
     try {
         $entry = New-Object byte[] $ENTRY_LEN
@@ -177,6 +192,8 @@ foreach ($c in $containers) {
             [void]$stream.Read($entry, 0, $ENTRY_LEN)
             $stream.Position = $bodyOffset
             [void]$stream.Read($head, 0, 8)
+
+            if ($i -eq 0) { [Array]::Copy($tableHead.Plain, 0, $entry, 0, 0xF0) }
 
             $name = Read-CString $entry
             $length = [BitConverter]::ToInt32($entry, 0x50)
@@ -201,7 +218,7 @@ foreach ($c in $containers) {
             Write-Host ("{0,4}  {1,8:x}  {2,10:x}  {3,8:x}  {4,-26}  {5}  {6}" -f `
                 $i, $entryOffset, $bodyOffset, $length, $shown, (Show-Hex $head), $when)
 
-            if ($null -eq $bestSave -and $bodyLive -and [BitConverter]::ToUInt32($head, 0) -le 5) {
+            if ($null -eq $bestSave -and $bodyLive -and [BitConverter]::ToUInt32($head, 0) -ge 4 -and [BitConverter]::ToUInt32($head, 0) -le 5) {
                 $bestSave = @{ File = $c.FullName; Slot = $i; Entry = $entry.Clone(); EntryOffset = $entryOffset }
             }
         }
@@ -248,7 +265,7 @@ if ($null -eq $bestSave) {
     Write-Host "Every container found holds only the system file, so the live save is elsewhere."
     Write-Host "Re-run with -DeepScan."
 } else {
-    Write-Host "$($bestSave.File) slot $($bestSave.Slot), entry at 0x$('{0:x}' -f $bestSave.EntryOffset):"
+    Write-Host "$($bestSave.File) slot $($bestSave.Slot), entry at 0x$('{0:x}' -f $bestSave.EntryOffset) (decrypted if slot 0):"
     Write-Host (Show-Hex $bestSave.Entry[0..0x5F])
     $bodyOffset = $PNG_HEADER + $ENTRY_COUNT * $ENTRY_LEN + $bestSave.Slot * $STRIDE
     Write-Host "body at 0x$('{0:x}' -f $bodyOffset), first 16 bytes:"
