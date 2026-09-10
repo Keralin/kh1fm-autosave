@@ -156,36 +156,89 @@ if ($containers.Count -eq 0) {
 }
 
 $bestSave = $null
+$BODY_BASE = $PNG_HEADER + $ENTRY_COUNT * $ENTRY_LEN
+
 foreach ($c in $containers) {
     Write-Host ""
     Write-Host "=== slots in $($c.FullName) ===" -ForegroundColor Cyan
-    Write-Host "slot     entry        body    length  name                        modified"
-    $used = 0
-    for ($i = 0; $i -lt $ENTRY_COUNT; $i++) {
-        $entryOffset = $PNG_HEADER + $i * $ENTRY_LEN
-        $entry = Read-Bytes $c.FullName $entryOffset $ENTRY_LEN
-        $name = Read-CString $entry
-        $length = [BitConverter]::ToInt32($entry, 0x50)
-        if ($name -eq "" -and $length -eq 0 -and $i -ne 99) { continue }
-        $used++
+    Write-Host "slot     entry        body    length  name                        body[0:8]            modified"
 
-        $modified = [BitConverter]::ToInt32($entry, 0x48)
-        $when = ""
-        if ($modified -gt 0) {
-            $when = [DateTimeOffset]::FromUnixTimeSeconds($modified).LocalDateTime.ToString("yyyy-MM-dd HH:mm")
+    $stream = [IO.File]::OpenRead($c.FullName)
+    try {
+        $entry = New-Object byte[] $ENTRY_LEN
+        $head = New-Object byte[] 8
+        $used = 0
+
+        for ($i = 0; $i -lt $ENTRY_COUNT; $i++) {
+            $entryOffset = $PNG_HEADER + $i * $ENTRY_LEN
+            $bodyOffset = $BODY_BASE + $i * $STRIDE
+
+            $stream.Position = $entryOffset
+            [void]$stream.Read($entry, 0, $ENTRY_LEN)
+            $stream.Position = $bodyOffset
+            [void]$stream.Read($head, 0, 8)
+
+            $name = Read-CString $entry
+            $length = [BitConverter]::ToInt32($entry, 0x50)
+
+            # A slot counts as used if EITHER its table entry or its body says so. Judging by
+            # the entry alone would hide a save whose metadata is blank but whose body is written.
+            $bodyLive = $false
+            foreach ($b in $head) { if ($b -ne 0) { $bodyLive = $true; break } }
+            if ($name -eq "" -and $length -eq 0 -and -not $bodyLive -and $i -ne 99) { continue }
+            $used++
+
+            $modified = [BitConverter]::ToInt32($entry, 0x48)
+            $when = ""
+            if ($modified -gt 0) {
+                $when = [DateTimeOffset]::FromUnixTimeSeconds($modified).LocalDateTime.ToString("yyyy-MM-dd HH:mm")
+            }
+            $shown = Clean-Name $name
+            if ($shown -eq "") { $shown = "(no name)" }
+            if ($i -eq 0) { $shown = "$shown [xor]" }
+            if ($i -eq 99) { $shown = "$shown <- target" }
+
+            Write-Host ("{0,4}  {1,8:x}  {2,10:x}  {3,8:x}  {4,-26}  {5}  {6}" -f `
+                $i, $entryOffset, $bodyOffset, $length, $shown, (Show-Hex $head), $when)
+
+            if ($null -eq $bestSave -and $bodyLive -and [BitConverter]::ToUInt32($head, 0) -le 5) {
+                $bestSave = @{ File = $c.FullName; Slot = $i; Entry = $entry.Clone(); EntryOffset = $entryOffset }
+            }
         }
-        $shown = Clean-Name $name
-        if ($shown -eq "") { $shown = "(empty)" }
-        if ($i -eq 0) { $shown = "$shown [xor]" }
-        if ($i -eq 99) { $shown = "$shown  <- autosave target" }
-        Write-Host ("{0,4}  {1,8:x}  {2,10:x}  {3,8:x}  {4,-26}  {5}" -f `
-            $i, $entryOffset, ($PNG_HEADER + $ENTRY_COUNT * $ENTRY_LEN + $i * $STRIDE), $length, $shown, $when)
+        Write-Host "$used of $ENTRY_COUNT slots show any content (slot 99 always listed)"
+    } finally { $stream.Close() }
+}
 
-        if ($length -eq $BODY_LEN -and $null -eq $bestSave) {
-            $bestSave = @{ File = $c.FullName; Slot = $i; Entry = $entry; EntryOffset = $entryOffset }
+# If no slot looks like a save, the layout itself is suspect. Show what the table region
+# actually contains so the real stride and naming are visible instead of assumed.
+if ($null -eq $bestSave) {
+    Write-Host ""
+    Write-Host "=== structure of the table region (layout check) ===" -ForegroundColor Cyan
+    $c = $containers[0]
+    $region = Read-Bytes $c.FullName 0 ($BODY_BASE + 0x100)
+    $text = [Text.Encoding]::ASCII.GetString($region)
+
+    Write-Host "printable runs of 6+ chars in the first $('0x{0:x}' -f $region.Length) bytes:"
+    $hits = 0
+    foreach ($m in [regex]::Matches($text, '[\x20-\x7E]{6,}')) {
+        Write-Host ("  0x{0:x8}  {1}" -f $m.Index, $m.Value)
+        $hits++
+        if ($hits -ge 40) { Write-Host "  ..."; break }
+    }
+    if ($hits -eq 0) { Write-Host "  none" }
+
+    Write-Host "offsets holding the value 0x16C00 (a full save body length):"
+    $needle = [BitConverter]::GetBytes([int]$BODY_LEN)
+    $found = 0
+    for ($i = 0; $i -le $region.Length - 4; $i++) {
+        if ($region[$i] -eq $needle[0] -and $region[$i+1] -eq $needle[1] -and
+            $region[$i+2] -eq $needle[2] -and $region[$i+3] -eq $needle[3]) {
+            Write-Host ("  0x{0:x8}  (entry would start at 0x{1:x})" -f $i, ($i - 0x50))
+            $found++
+            if ($found -ge 20) { Write-Host "  ..."; break }
         }
     }
-    Write-Host "$used of $ENTRY_COUNT slots in use (slot 99 always listed)"
+    if ($found -eq 0) { Write-Host "  none, so no entry in this file declares a full save body" }
 }
 
 Write-Host ""
