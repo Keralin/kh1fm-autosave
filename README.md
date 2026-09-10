@@ -12,7 +12,8 @@ Continue option after a game over.
 
 ## What it does
 
-- **Slot 99** holds the newest snapshot. Load it from the title screen like a normal save.
+While you play, it writes snapshots to its own files. Nothing else touches your saves.
+
 - **Two side copies** (`kh1-autosave.dat`, `kh1-autosave-prev.dat`) sit next to the LuaBackend
   dll and can be dropped straight back into the running game:
 
@@ -22,6 +23,14 @@ Continue option after a game over.
 | `L1 + L2 + R1 + R2 + D-pad Down` | Restore the one before it |
 
 Nothing to press to save. That happens on its own on every room load.
+
+- **Save 99**, if you launch through `tools/play-kh1.ps1`. It promotes the last snapshot into a
+  real save slot before starting the game, so after a crash you relaunch and load save 99 from
+  the menu like any other save.
+
+The container is written only there, with the game not running. Writing it from inside the game
+races the game's own writes and corrupts saves, which is exactly what happened; see
+`WRITE_TO_SAVE_SLOT` in the script.
 
 The older side copy is there for the one case that bites: you walk into a boss arena
 underleveled, the autosave points at that room, and restoring it drops you straight back into
@@ -34,6 +43,24 @@ using the save point you had just loaded, and Right handed you back your own sav
 Your own saves start at slot 0 and are never touched. To put the autosave somewhere else,
 change `AUTOSAVE_SLOT` at the top of `1fmAutosave.lua` (it is the slot index, one below the
 save number you see in-game).
+
+## Putting the autosave in save 99
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\play-kh1.ps1
+```
+
+That promotes the newest snapshot into slot 98 (shown as save 99), then launches the game. Run
+it instead of the Steam shortcut and save 99 stays one launch behind at worst, which is all you
+need: during a session the button combos restore instantly, and after a crash the relaunch is
+what brings save 99 up to date.
+
+`tools/promote-autosave.ps1` does the promotion alone if you would rather start the game
+yourself. Both refuse to run while the game is open, back the container up first, check the
+snapshot's size and magic code, and put the backup back if the write does not read correctly.
+
+**Turn Steam Cloud off for the game** while you use this. Steam syncing a file that changed
+outside the game's own session is another way to end up with a save it will not load.
 
 ## Back up first
 
